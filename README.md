@@ -1,3 +1,10 @@
+## Academic Project Note / Reproduction Study
+
+This repository is an academic fork created for a university reproduction study of the original NaSE model.
+We reproduced the training workflow and added targeted modifications to the NaSE model for our evaluation setup.
+All rights to the original codebase and model architecture belong to the original authors.
+The original README content starts below.
+
 # NaSE: News-adapted Sentence Embeddings
 
 NaSE is a news-adapted sentence encoder, domain-specialized from a pretrained massively multilingual sentence encoder (e.g, [LaBSE](https://aclanthology.org/2022.acl-long.62)) leveraging the [PolyNews](https://huggingface.co/datasets/aiana94/polynews) and [PolyNewsParallel](https://huggingface.co/datasets/aiana94/polynews-parallel) datasets.
