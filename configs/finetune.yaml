@@ -1,0 +1,50 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: datamodule
+  - model: nase
+  - callbacks: default.yaml
+  - logger: wandb.yaml
+  - trainer: gpu.yaml
+  - paths: default.yaml
+  - extras: default.yaml
+  - hydra: default.yaml
+  - experiment: null
+  - hparams_search: null
+  - optional local: default.yaml
+  - debug: null
+
+task_name: "finetune"
+
+tags: ["finetune", "nase", "pretrained"]
+
+data:
+  tokenizer:
+    _target_: transformers.BertTokenizerFast.from_pretrained
+    _recursive_: False
+    pretrained_model_name_or_path: "aiana94/NaSE"
+    use_fast: True
+  rec_tokenizer:
+    _target_: transformers.BertTokenizerFast.from_pretrained
+    _recursive_: False
+    pretrained_model_name_or_path: "aiana94/NaSE"
+    use_fast: True
+
+model:
+  language_model:
+    _target_: transformers.BertModel.from_pretrained
+    _recursive_: False
+    pretrained_model_name_or_path: "aiana94/NaSE"
+  tokenizer:
+    _target_: transformers.BertTokenizerFast.from_pretrained
+    _recursive_: False
+    pretrained_model_name_or_path: "aiana94/NaSE"
+    use_fast: True
+  freeze_encoder: False
+
+train: True
+test: False
+compile: False
+
+seed: null

@@ -8,6 +8,11 @@ combined_objectives: False
 train_batch_size: 8
 training_languages: null
 min_examples: 100
+behavior_sample_fraction: null
+local_train_data_dir: null
+local_train_file: train.tsv
+local_train_fraction: null
+local_train_max_rows: null
 
 tokenizer: 
   _target_: transformers.AutoTokenizer.from_pretrained

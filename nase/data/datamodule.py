@@ -1,3 +1,4 @@
+import os
 from typing import Any, List, Dict, Optional
 
 import hydra
@@ -16,6 +17,7 @@ from nase.data.components.datasets import (
         RecommendationDatasetTest
         )
 from nase.data.components.samplers import MultinomialSampler
+from nase.data.components import file_utils
 from nase.utils import RankedLogger
 
 log = RankedLogger(__name__, rank_zero_only=True)
@@ -29,6 +31,11 @@ class DataModule(LightningDataModule):
             combined_objectives: bool,
             training_languages: Optional[List[str]],
             min_examples: Optional[int],
+            behavior_sample_fraction: Optional[float],
+            local_train_data_dir: Optional[str],
+            local_train_file: str,
+            local_train_fraction: Optional[float],
+            local_train_max_rows: Optional[int],
             tokenizer: DictConfig,
             rec_tokenizer: DictConfig,
             xmind_dataset_size: str,
@@ -58,28 +65,56 @@ class DataModule(LightningDataModule):
 
         Do not use it to assign state (self.x = y).
         """
-        configs = get_dataset_config_names(self.hparams.polynews_dataset_name)
-        if not self.hparams.parallel_data:
-            languages = self.hparams.training_languages if self.hparams.training_languages else configs 
-        else:
-             if self.hparams.training_languages:
-                 languages = [lang for lang in configs if lang.split('-')[0] in self.hparams.training_languages or lang.split('-')[1] in self.hparams.training_languages]
-             else:
-                 languages = configs
-        
-        log.info(f"Loading training datasets from {self.hparams.polynews_dataset_name}.")
-        for lang in tqdm(languages):
+        if self.hparams.local_train_data_dir:
+            local_train_path = os.path.join(self.hparams.local_train_data_dir, self.hparams.local_train_file)
+            if not file_utils.check_integrity(local_train_path):
+                raise FileNotFoundError(f"Local training dataset not found: {local_train_path}")
+
+            log.info(f"Loading local training dataset from {local_train_path}.")
             dataset = load_dataset(
-                    self.hparams.polynews_dataset_name,
-                    lang,
-                    split='train'
+                    "csv",
+                    data_files=local_train_path,
+                    delimiter="\t",
+                    split="train",
                     )
-            if self.hparams.min_examples:
-                if len(dataset) > self.hparams.min_examples:
-                    self.lg2dataset[lang] = dataset
-        
-        languages_omitted = [lang for lang in languages if lang not in self.lg2dataset]
-        log.info(f"Using {len(self.lg2dataset)} languages from PolyNews for pretraining. Omitted {len(languages_omitted)} languages with fewer than {self.hparams.min_examples} examples: {' '.join(languages_omitted)}\n")
+
+            if self.hparams.local_train_max_rows is not None:
+                max_rows = min(self.hparams.local_train_max_rows, len(dataset))
+                dataset = dataset.select(range(max_rows))
+
+            if self.hparams.local_train_fraction is not None:
+                fraction = self.hparams.local_train_fraction
+                if not 0 < fraction <= 1:
+                    raise ValueError("local_train_fraction must be in the interval (0, 1].")
+                sample_size = max(1, int(len(dataset) * fraction))
+                dataset = dataset.shuffle(seed=42).select(range(sample_size))
+
+            dataset_name = os.path.basename(os.path.normpath(self.hparams.local_train_data_dir)) or "local"
+            self.lg2dataset = {dataset_name: dataset}
+            log.info(f"Using local training dataset '{dataset_name}' with {len(dataset)} rows for fine-tuning.\n")
+        else:
+            configs = get_dataset_config_names(self.hparams.polynews_dataset_name)
+            if not self.hparams.parallel_data:
+                languages = self.hparams.training_languages if self.hparams.training_languages else configs 
+            else:
+                 if self.hparams.training_languages:
+                     languages = [lang for lang in configs if lang.split('-')[0] in self.hparams.training_languages or lang.split('-')[1] in self.hparams.training_languages]
+                 else:
+                     languages = configs
+            
+            log.info(f"Loading training datasets from {self.hparams.polynews_dataset_name}.")
+            for lang in tqdm(languages):
+                dataset = load_dataset(
+                        self.hparams.polynews_dataset_name,
+                        lang,
+                        split='train'
+                        )
+                if self.hparams.min_examples:
+                    if len(dataset) > self.hparams.min_examples:
+                        self.lg2dataset[lang] = dataset
+
+            languages_omitted = [lang for lang in languages if lang not in self.lg2dataset]
+            log.info(f"Using {len(self.lg2dataset)} languages from PolyNews for pretraining. Omitted {len(languages_omitted)} languages with fewer than {self.hparams.min_examples} examples: {' '.join(languages_omitted)}\n")
         
         log.info("Loading validation datasets.")
         for tgt_lang in tqdm(self.hparams.tgt_languages):
@@ -92,6 +127,7 @@ class DataModule(LightningDataModule):
                     eval_tgt_lang=True if tgt_lang != 'eng' else False,
                     dataset_attributes=self.hparams.dataset_attributes,
                     valid_time_split=self.hparams.valid_time_split,
+                    behavior_sample_fraction=self.hparams.behavior_sample_fraction,
                     train=True,
                     validation=True,
                     download_mind=True,
@@ -122,6 +158,7 @@ class DataModule(LightningDataModule):
                     eval_tgt_lang=True if tgt_lang != 'eng' else False,
                     dataset_attributes=self.hparams.dataset_attributes,
                     valid_time_split=self.hparams.valid_time_split,
+                    behavior_sample_fraction=self.hparams.behavior_sample_fraction,
                     train=True,
                     validation=True,
                     download_mind=False,

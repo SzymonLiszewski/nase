@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch_geometric.utils import to_dense_batch
-from torchmetrics.retrieval import RetrievalMRR
+from torchmetrics.retrieval import RetrievalMRR, RetrievalAUROC, RetrievalNormalizedDCG
 from torchmetrics import MeanMetric
 
 from nase.data.components.rec_batch import RecommendationBatch
@@ -28,6 +28,7 @@ class NASE(LightningModule):
             val_batch_size: int,
             optimizer: DictConfig,
             scheduler: Optional[DictConfig] = None,
+            freeze_encoder: bool = False,
             ) -> None:
         super().__init__()
         
@@ -35,17 +36,29 @@ class NASE(LightningModule):
 
         model = hydra.utils.instantiate(self.hparams.language_model)
         tokenizer = hydra.utils.instantiate(self.hparams.tokenizer)
+        decoder_name_or_path = getattr(
+            self.hparams.language_model,
+            "pretrained_model_name_or_path",
+            self.hparams.language_model,
+            )
         self.loss_fct = DenoisingAutoEncoderLoss(
                 model=model,
                 tokenizer=tokenizer,
-                decoder_name_or_path=self.hparams.language_model,
+            decoder_name_or_path=decoder_name_or_path,
                 tie_encoder_decoder=True
                 )
+
+        if self.hparams.freeze_encoder:
+            for param in self.loss_fct.encoder.parameters():
+                param.requires_grad = False
+            log.info("Encoder parameters are frozen (requires_grad=False).")
 
         self.click_predictor = DotProduct()
         
         self.train_loss = MeanMetric()      
-        self.mrr = nn.ModuleList([RetrievalMRR() for _ in range(len(self.hparams.tgt_languages))]) 
+        self.mrr = nn.ModuleList([RetrievalMRR() for _ in range(len(self.hparams.tgt_languages))])
+        self.auroc = nn.ModuleList([RetrievalAUROC() for _ in range(len(self.hparams.tgt_languages))])
+        self.ndcg_10 = nn.ModuleList([RetrievalNormalizedDCG(top_k=10) for _ in range(len(self.hparams.tgt_languages))]) 
 
     def forward(self, batch) -> torch.Tensor:
         loss = self.loss_fct(batch)
@@ -61,7 +74,7 @@ class NASE(LightningModule):
 
         return loss   
     
-    def validation_step(self, batch: RecommendationBatch, batch_idx: int, dataloader_idx: int) -> None:
+    def validation_step(self, batch: RecommendationBatch, batch_idx: int, dataloader_idx: int = 0) -> None:
         # encode history
         hist_news_vector = self.loss_fct.encoder(**batch['x_hist']['text']).pooler_output
         hist_news_vector_agg, mask_hist = to_dense_batch(hist_news_vector, batch['batch_hist'])
@@ -103,31 +116,35 @@ class NASE(LightningModule):
         indexes = torch.arange(cand_news_size.shape[0]).repeat_interleave(cand_news_size)
         
         self.mrr[dataloader_idx].update(preds, targets, indexes)
-        self.log(
-            f"val/mrr_{dataloader_idx}", 
-            self.mrr[dataloader_idx], 
-            on_step=False, 
-            on_epoch=True, 
-            prog_bar=True, 
-            logger=True, 
-            batch_size=self.hparams.val_batch_size
-        )
+        self.auroc[dataloader_idx].update(preds, targets, indexes)
+        self.ndcg_10[dataloader_idx].update(preds, targets, indexes)
 
     def on_validation_epoch_end(self):
-        # compute average MRR across all dataloaders
-        avg_mrr = torch.stack(
-                [self.mrr[idx].compute() for idx in range(len(self.mrr))]
-                ).mean()
-
-        # log average MRR
-        self.log(
-                "val/avg_mrr",
-                avg_mrr,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True
-                )
+        # compute all metrics (both per-language and average) and scale to 0-100 for literature comparison
+        mrr_values = torch.stack([self.mrr[idx].compute() for idx in range(len(self.mrr))]) * 100
+        
+        # AUROC and nDCG don't have deterministic GPU implementations, temporarily disable determinism
+        deterministic_state = torch.are_deterministic_algorithms_enabled()
+        if deterministic_state:
+            torch.use_deterministic_algorithms(False)
+        
+        try:
+            auroc_values = torch.stack([self.auroc[idx].compute() for idx in range(len(self.auroc))]) * 100
+            ndcg_10_values = torch.stack([self.ndcg_10[idx].compute() for idx in range(len(self.ndcg_10))]) * 100
+        finally:
+            if deterministic_state:
+                torch.use_deterministic_algorithms(True)
+        
+        # log per-language metrics (scale 0-100)
+        for idx in range(len(self.mrr)):
+            self.log(f"val/mrr_{idx}", mrr_values[idx], on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log(f"val/auroc_{idx}", auroc_values[idx], on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log(f"val/ndcg10_{idx}", ndcg_10_values[idx], on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        
+        # log average metrics (scale 0-100)
+        self.log("val/avg_mrr", mrr_values.mean(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val/avg_auroc", auroc_values.mean(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val/avg_ndcg10", ndcg_10_values.mean(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
     
     def test_step(self, batch: RecommendationBatch, batch_idx: int) -> None:
         pass
